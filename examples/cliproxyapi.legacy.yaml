@@ -1,0 +1,25 @@
+# Merge into existing older CLIProxyAPI config. Do not duplicate YAML keys.
+openai-compatibility:
+  - name: opencode-free-proxy
+    base-url: http://127.0.0.1:8787/v1
+    api-key-entries:
+      - api-key: "PASTE_PROXY_API_KEY_FROM_ENV"
+    models:
+      - name: big-pickle
+        alias: opencode-big-pickle
+      - name: beam-free
+        alias: opencode-beam-free
+      - name: mimo-v2.6-flash-free
+        alias: opencode-mimo-v2.6-flash-free
+      - name: nemotron-3.5-super-vl-free
+        alias: opencode-nemotron-3.5-super-vl-free
+      - name: nemotron-3.5-lightning-free
+        alias: opencode-nemotron-3.5-lightning-free
+      - name: longcat-2.5-preview-free
+        alias: opencode-longcat-2.5-preview-free
+      - name: deepseek-v4.1-flash-free
+        alias: opencode-deepseek-v4.1-flash-free
+      - name: glm-5.3-flash-free
+        alias: opencode-glm-5.3-flash-free
+      - name: minimax-m3.1-flash-free
+        alias: opencode-minimax-m3.1-flash-free
