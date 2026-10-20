@@ -1,0 +1,30 @@
+services:
+  proxy:
+    build: .
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3005"
+    ports:
+      - "127.0.0.1:3005:3005"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - --input-type=module
+        - -e
+        - "const response = await fetch('http://127.0.0.1:3005/health'); process.exit(response.ok ? 0 : 1);"
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3

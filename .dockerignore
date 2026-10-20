@@ -1,0 +1,11 @@
+# Only build inputs enter the context; credentials and Git history stay outside.
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.test.json
+!src/
+!src/**
+!test/
+!test/**

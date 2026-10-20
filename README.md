@@ -1,128 +1,214 @@
-# OpenCode → CLIProxyAPI proxy
+# OpenCode → CLIProxyAPI Proxy
 
-Node.js + TypeScript. OpenAI Chat Completions isteklerini OpenCode'a ileten küçük aracı sunucu. Runtime bağımlılığı yok; Node HTTP, fetch ve stream kullanır.
+A small Node.js + TypeScript gateway that exposes OpenCode models through an OpenAI-compatible API for CLIProxyAPI. No runtime dependencies: the server uses Node HTTP, fetch, and streams.
 
-## 403 düzeltmesi ve canlı doğrulama
-
-Sıradan Chat Completions isteği ve yalnızca header taklidi `403 FreeTierError` döndürüyordu. Kurulu OpenCode **2.0.32** istemcisinin isteği izole ortamda incelendi. Aşağıdaki kombinasyonla `big-pickle` modelinden **HTTP 200 / OK** alındı ve proxy'ye uygulandı:
-
-- `Authorization: Bearer public` — kişisel OpenCode anahtarı gerekmiyor; `.env` içindeki `OPENCODE_API_KEY` boş kalabilir.
-- `User-Agent: opencode/latest/2.0.32/cli` ve OpenCode oturum header'ları.
-- `ses_` + 12 hex + 14 Base62 karakter biçiminde oturum ID'si.
-- Upstream'e her zaman `stream: true`.
-- `bash`, `glob`, `grep`, `read` araç tanımları; istemcide eksik olanlar yalnızca uyumluluk tanımı olarak eklenir.
-
-**Derlenmiş proxy üzerinden canlı doğrulandı:** normal JSON yanıtı, SSE akışı ve istemcinin tanımladığı `lookup` aracına çağrı. Üçü de `big-pickle` ile **200** döndürdü. Diğer listedeki modellerin tamamı canlı denenmedi.
-
-Önemli düzeltme: önceki gerçek istemci denemesinde tüm araç izinleri kapatılmıştı; bu yüzden o 403 sonucu, normal OpenCode isteğinin de başarısız olduğunu kanıtlamıyordu. Araç tanımlarının ve streaming'in de hesaba katılmasıyla çalışan istek elde edildi.
-
-Bu, sağlayıcının erişim kurallarının gelecekte değişmeyeceği anlamına gelmez. Güncel kullanım koşullarına uy; hesap/kota/IP döndürme veya otomatik yeniden deneme yapılmaz. Kalan 403/429 hataları aynen iletilir.
-
-## Kurulum
-
-Node.js **22.19+** gerekir.
-
-```bash
-cd /home/asugan/Projects/opencode-free-proxy
-npm install
+```text
+Client → CLIProxyAPI → this proxy → OpenCode
 ```
 
-Bu klasörde ilk kurulumda rastgele `PROXY_API_KEY` içeren `.env` oluşturuldu. Yoksa:
+## Quick start with Docker Compose
+
+Requires Docker Engine and Docker Compose v2.
 
 ```bash
+git clone https://github.com/asugan/opencode-free-proxy.git
+cd opencode-free-proxy
 cp .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-Üretilen anahtarı `.env` içindeki `PROXY_API_KEY` değerine yaz. `OPENCODE_API_KEY` boşsa upstream için `public` kullanılır. Kendi OpenCode anahtarını isteğe bağlı verebilirsin. Bu iki anahtar farklıdır: ilki CLIProxyAPI → proxy, ikincisi proxy → OpenCode içindir. `.env` ve gerçek anahtarları Git'e ekleme.
+Set `PROXY_API_KEY` in `.env` to the generated key. If Node.js is unavailable on the host, generate a random key with `openssl rand -hex 32` instead. An existing local `.env` can be reused without changing its key. Never commit real credentials.
 
 ```bash
+docker compose up -d --build --wait
+curl --fail http://127.0.0.1:3005/health
+docker compose ps
+```
+
+**Docker base URL: `http://127.0.0.1:3005/v1`**
+
+- The multi-stage build runs type checks, automated tests, and TypeScript compilation.
+- The final application directory contains only compiled code. Source files, tests, and development dependencies are not copied into the runtime image.
+- `.dockerignore` restricts the build context to required inputs. Credentials and Git history stay outside the image.
+- Compose loads `.env` at runtime; the file is not copied or mounted into the container. Container settings `HOST=0.0.0.0` and `PORT=3005` override the native development values in `.env`.
+- The container runs as a non-root user with a read-only filesystem, dropped Linux capabilities, and privilege escalation disabled.
+- A healthcheck is enabled. `restart: unless-stopped` restarts the service after process failures or Docker restarts; an unhealthy status alone does not trigger a restart.
+- The published port binds to **127.0.0.1 only**, not the public network.
+
+```bash
+docker compose logs -f proxy          # Follow logs
+docker compose up -d --build --wait   # Rebuild/recreate after code or configuration changes
+docker compose down                  # Stop and remove containers; keep the local configuration file
+```
+
+### Verification status
+
+Verified on **2026-10-20**:
+
+| Check | Result |
+| --- | --- |
+| Docker build, type checks, and 21 automated tests | Passed |
+| Host health endpoint on port 3005 | HTTP 200 |
+| Model discovery without a proxy key | HTTP 401 |
+| Authenticated model discovery inside the container | HTTP 200, 9 configured models |
+| Non-root runtime and application directory contents | Verified |
+| Native compiled proxy: JSON chat, SSE chat, and caller-defined `lookup` tool with `big-pickle` | HTTP 200 for all three |
+| Latest Docker live chat smoke test with `big-pickle` | Client timed out after 60 seconds; successful container inference has not been verified |
+
+A healthy container proves local service availability, **not** upstream inference availability. The Docker timeout remains unresolved; its cause has not been established. The successful native tests do not prove that the container's outbound inference path works. Other models have not all been tested with live inference.
+
+## Native development
+
+Requires **Node.js 22.19+**.
+
+```bash
+npm ci
+# Create and configure the local environment file as described above, if needed.
 npm run dev
-# Derlenmiş sürüm:
+```
+
+For a compiled native build:
+
+```bash
 npm run build
 npm start
 ```
 
-Varsayılan adres: `http://127.0.0.1:8787`. Servis otomatik kurulmaz; terminal kapatılırsa kapanır.
+**Native base URL: `http://127.0.0.1:8787/v1`** by default. Native startup does not install a background service; closing the process stops the server.
 
-## CLIProxyAPI bağlantısı
+## Configuration
 
-```text
-İstemci → CLIProxyAPI :8317 → bu proxy :8787 → OpenCode
-```
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PROXY_API_KEY` | Required | Local Bearer key, at least 24 characters; used by CLIProxyAPI to access this proxy. |
+| `OPENCODE_API_KEY` | Empty | Optional upstream credential. If empty, the proxy uses `Bearer public`. |
+| `OPENCODE_BASE_URL` | `https://opencode.ai/inference/openai/v1` | Upstream base URL; `/chat/completions` is appended. |
+| `HOST` | `127.0.0.1` | Native bind address; overridden to `0.0.0.0` inside Compose. |
+| `PORT` | `8787` | Native port; overridden to `3005` inside Compose. |
+| `REQUEST_TIMEOUT_MS` | `300000` | Total request/stream deadline in milliseconds. |
+| `ALLOWED_MODELS` | Curated list of 9 chat models | Comma-separated replacement for the entire default allowlist. |
 
-CLIProxyAPI sürümüne göre mevcut config'e ilgili örneği **birleştir**:
+The local proxy key and the optional OpenCode key serve different purposes. The local key is never forwarded upstream. Prompts and credentials are not logged.
 
-- v8: [`examples/cliproxyapi.v8.yaml`](examples/cliproxyapi.v8.yaml), `api-keys.openai-compatibility` altında.
-- Eski sürüm: [`examples/cliproxyapi.legacy.yaml`](examples/cliproxyapi.legacy.yaml), kökte `openai-compatibility` altında.
+Only configure trusted upstream URLs: prompts and any upstream key are sent to that address. Remote upstreams must use HTTPS. Redirects are not followed.
 
-`PASTE_PROXY_API_KEY_FROM_ENV` yerine `.env` içindeki `PROXY_API_KEY` değerini koy. Mevcut config'i silme, aynı YAML anahtarını ikinci kez tanımlama. CLIProxyAPI'yi config'ine uygun şekilde yeniden yükle/başlat.
+## CLIProxyAPI integration
 
-Örnek model: `opencode-big-pickle`. CLIProxyAPI bunu upstream `big-pickle` adına çevirir. CLIProxyAPI'ye bağlanan istemci ise CLIProxyAPI'nin kendi istemci anahtarını kullanır; proxy anahtarını değil.
+Merge the appropriate example into your existing CLIProxyAPI configuration:
 
-### Docker / farklı makine
+- **v8:** [`examples/cliproxyapi.v8.yaml`](examples/cliproxyapi.v8.yaml), under `api-keys.openai-compatibility`.
+- **Legacy:** [`examples/cliproxyapi.legacy.yaml`](examples/cliproxyapi.legacy.yaml), under the top-level `openai-compatibility` key.
 
-`127.0.0.1` yalnızca aynı ağ ad alanını gösterir. CLIProxyAPI Docker içindeyse host'taki proxy'ye ulaşmak için `host.docker.internal` ve Linux'ta `host-gateway` eşlemesi veya uygun host networking gerekir. Proxy'nin `HOST` değerini erişilebilir arayüze ayarlaman gerekebilir. `HOST=0.0.0.0` tüm arayüzleri açar; güvenlik duvarıyla erişimi sınırla. Genel internet için TLS reverse proxy ve rate limit gerekir; bu proje bunları kurmaz.
+Replace `PASTE_PROXY_API_KEY_FROM_ENV` with your local `PROXY_API_KEY`. Do not overwrite your entire configuration or introduce duplicate YAML keys. Reload or restart CLIProxyAPI as appropriate for your installation.
 
-## Kontrol
+The examples use the native port, **8787**. For this Docker deployment, change their `base-url` to **`http://127.0.0.1:3005/v1`** when CLIProxyAPI runs on the same host.
 
-Anahtarı shell geçmişine yazmadan, proje klasöründe:
+Example client model: **`opencode-big-pickle`**. CLIProxyAPI maps this alias to upstream model `big-pickle`. Clients connecting to CLIProxyAPI use **CLIProxyAPI's own client key**, not this proxy's key.
+
+### Container networking and remote access
+
+`127.0.0.1` always refers to the current network namespace. A separate CLIProxyAPI container cannot use its own localhost to reach this proxy. Attach both containers to a shared Docker network and use **`http://proxy:3005/v1`**, assuming the service name is unambiguous on that network.
+
+For a native proxy running on the Docker host, `host.docker.internal` may be used with an appropriate host bind address; Linux generally requires a `host-gateway` mapping. This does not make a host-loopback-only listener reachable from another network namespace.
+
+Publishing on all interfaces requires an explicit port-binding change in `compose.yaml`. Restrict access with a firewall. Public deployment requires TLS and rate limiting, neither of which is provisioned here.
+
+## Request verification
+
+For Docker, run this from the project directory. It uses the container's environment without printing credentials:
 
 ```bash
-curl http://127.0.0.1:8787/health
+curl --fail http://127.0.0.1:3005/health
 
-node --env-file=.env --input-type=module <<'JS'
+docker compose exec -T proxy node --input-type=module <<'JS'
 const headers = {
   authorization: `Bearer ${process.env.PROXY_API_KEY}`,
   'content-type': 'application/json',
 };
-console.log(await (await fetch('http://127.0.0.1:8787/v1/models', { headers })).json());
-const response = await fetch('http://127.0.0.1:8787/v1/chat/completions', {
-  method: 'POST', headers,
+const base = 'http://127.0.0.1:3005/v1';
+console.log(await (await fetch(`${base}/models`, { headers })).json());
+const response = await fetch(`${base}/chat/completions`, {
+  method: 'POST',
+  headers,
   body: JSON.stringify({
     model: 'big-pickle',
-    messages: [{ role: 'user', content: 'Yalnızca merhaba yaz.' }],
+    messages: [{ role: 'user', content: 'Reply only hello.' }],
     stream: true,
-    max_tokens: 32,
+    max_tokens: 64,
   }),
+  signal: AbortSignal.timeout(60000),
 });
 console.log('HTTP', response.status);
 for await (const chunk of response.body) process.stdout.write(chunk);
 JS
 ```
 
-`/health` yalnızca proxy'nin çalıştığını gösterir. `/v1/models` **yerel yapılandırılmış listeyi** döndürür; upstream erişimi veya anlık model kullanılabilirliğini doğrulamaz. `403 FreeTierError` ağ/proxy hatası değil, OpenCode erişim kısıtıdır. `429` kota/rate limit durumudur; `Retry-After` korunur. Otomatik retry yok.
+For native development, run the JavaScript block with `node --env-file=.env --input-type=module` instead, and change the port to `8787`.
 
-## Kapsam
+`/health` is a liveness check. `/v1/models` returns the **local configured allowlist**, not an upstream availability check. A `403 FreeTierError` comes from OpenCode's access checks; `429` indicates a quota or rate limit, and `Retry-After` is preserved. There are no automatic retries.
 
-- `GET /health` — anahtarsız liveness.
-- `GET /v1/models` — Bearer anahtarlı, yerel allowlist.
-- `POST /v1/chat/completions` — istemci `stream:true` isterse SSE, aksi halde upstream SSE akışı birleştirilerek normal OpenAI JSON yanıtı döner. Metin, reasoning, çoklu choice, tool_calls, finish_reason ve usage korunur.
-- İstemcinin araç şemaları ve açıkça verdiği `tool_choice` korunur. Eksik dört uyumluluk tanımı eklenir. Araçsız sohbette varsayılan `tool_choice:none` olur.
-- Proxy **hiçbir araç çalıştırmaz**, shell açmaz, dosya okumaz. İstemcinin tanımlamadığı araca çağrı gelirse yanıt hata ile kesilir; bu çağrı istemciye aktarılmaz. Güvenlik için tool-call parçaları tamamlanana kadar tutulur; metin anında akar.
-- `x-opencode-session`, `x-session-id`, `x-opencode-session-id` veya gövdedeki `prompt_cache_key` varsa oturum eşlemesinde kullanılır. Canonical oturum aynen korunur; diğer değerler deterministik eşlenir. Hiçbiri yoksa yeni ID üretilir.
-- İstemci bağlantısı kapanınca upstream iptal edilir; backpressure korunur. Yerel anahtar upstream'e iletilmez. Prompt/anahtar loglanmaz.
-- 4 MiB istek, 1 MiB SSE event, 32 MiB toplam upstream yanıt sınırı; varsayılan **300 saniye toplam istek/akış süresi**. Eksik `[DONE]`, eksik finish_reason ve uyumluluk aracına çağrı normal JSON isteğinde 502; SSE başladıysa bağlantı kesilmesi olarak görünür.
-- `/responses`, `/messages`, embeddings, görsel üretimi, ses çıktısı ve tarayıcı CORS desteği yok. Eski `functions/function_call` yerine `tools/tool_choice` kullan. Gerekli istemci protokol dönüşümlerini CLIProxyAPI üstlenmeli.
+## OpenCode compatibility and the original 403
 
-## Modeller / ücret riski
+Ordinary Chat Completions requests, and requests with only a changed User-Agent, returned `403 FreeTierError`. The installed OpenCode **2.0.32** client's request was inspected in an isolated environment. The following combination produced a native **HTTP 200 / OK** response from `big-pickle` and is implemented in the proxy:
 
-`src/proxy.ts` içinde dokümantasyon ve canlı model listesine göre hazırlanmış 9 chat modeli var. System One kullanan `jev-1.13-free`, Chat Completions modeli olmadığı için dahil değil. Liste otomatik güncellenmez.
+- `Authorization: Bearer public` when no personal upstream key is configured.
+- `User-Agent: opencode/latest/2.0.32/cli` and OpenCode session headers.
+- A canonical session ID: `ses_` + 12 hexadecimal characters + 14 Base62 characters.
+- Upstream requests always use `stream: true`.
+- Tool declarations for `bash`, `glob`, `grep`, and `read`; missing declarations are added for compatibility only.
 
-`.env` üzerinden listeyi değiştirebilirsin:
+An earlier native-client test disabled all tool permissions, so its failure was not a conclusive test of a normal OpenCode request. Including tool declarations and streaming produced the successful requests described above.
+
+This compatibility behavior is not a guarantee of future access or permission under the provider's terms. Follow the current service terms. The proxy does not rotate accounts, quotas, or IP addresses; remaining upstream access errors are forwarded.
+
+## API behavior and limits
+
+- `GET /health`: unauthenticated liveness check.
+- `GET /v1/models`: authenticated local model allowlist.
+- `POST /v1/chat/completions`: SSE when the client requests `stream: true`; otherwise the upstream stream is aggregated into an OpenAI-compatible JSON response. Text, reasoning, multiple choices, tool calls, finish reasons, logprobs, and usage are retained.
+- Caller tool schemas and explicitly supplied `tool_choice` values are preserved. Missing compatibility declarations are added. Plain chat defaults to `tool_choice: none`.
+- **The proxy never executes tools, opens a shell, or reads files on behalf of the model.** Calls to tools the client did not declare are blocked. Tool fragments are held until complete so compatibility-only calls never reach the client; text streams immediately.
+- Session mapping uses `x-opencode-session`, `x-session-id`, `x-opencode-session-id`, or the request's `prompt_cache_key`. Canonical IDs are preserved, other values are mapped deterministically, and requests without a session receive a new ID.
+- Client disconnection cancels the upstream request; stream backpressure is respected.
+- Limits: **4 MiB request body**, **1 MiB SSE event**, **32 MiB upstream response**, and a default **300-second total deadline**.
+- Incomplete streams or undeclared tool calls produce a 502 for non-streaming clients. If SSE headers have already been sent, the connection is terminated instead; its HTTP status can no longer be changed.
+- Not implemented: `/responses`, `/messages`, embeddings, image generation, audio output, or browser CORS support. Use `tools/tool_choice` rather than legacy `functions/function_call`. CLIProxyAPI must handle any required client-protocol conversion.
+
+## Current free model catalog
+
+Checked **2026-10-20 at 19:10 UTC** against the [live model catalog](https://opencode.ai/inference/v1/models) and [official pricing/endpoint documentation](https://opencode.ai/docs/zen/). The following 10 models were both present in the live catalog and documented as free:
+
+| Model | Upstream ID | Included in this proxy by default |
+| --- | --- | --- |
+| Big Pickle | `big-pickle` | Yes — Chat Completions |
+| Beam Free | `beam-free` | Yes — Chat Completions |
+| MiMo-V2.6-Flash Free | `mimo-v2.6-flash-free` | Yes — Chat Completions |
+| Nemotron 3.5 Super VL Free | `nemotron-3.5-super-vl-free` | Yes — Chat Completions |
+| Nemotron 3.5 Lightning Free | `nemotron-3.5-lightning-free` | Yes — Chat Completions |
+| LongCat 2.5 Preview Free | `longcat-2.5-preview-free` | Yes — Chat Completions |
+| DeepSeek V4.1 Flash Free | `deepseek-v4.1-flash-free` | Yes — Chat Completions |
+| GLM-5.3-Flash Free | `glm-5.3-flash-free` | Yes — Chat Completions |
+| MiniMax M3.1 Flash Free | `minimax-m3.1-flash-free` | Yes — Chat Completions |
+| Jev 1.13 Free | `jev-1.13-free` | No — uses System One, not Chat Completions |
+
+The documentation also lists `ll-alpha-free`, `exo-free`, `mimo-v2.5-free`, and `nemotron-3-ultra-free`, but those IDs were absent from the live catalog at the check above. They are not enabled here. Catalog presence is not proof of successful inference or access from your account/network.
+
+The default allowlist in `src/proxy.ts` is curated and **does not update automatically**. Override it with:
 
 ```dotenv
 ALLOWED_MODELS=big-pickle,glm-5.3-flash-free
 REQUEST_TIMEOUT_MS=300000
 ```
 
-Bu ayar varsayılan listenin **tamamını değiştirir**. CLIProxyAPI örneğindeki modelleri de aynı şekilde düzenle. Allowlist dışı modeller upstream'e gitmeden reddedilir.
+This **replaces the entire default list**. Update your CLIProxyAPI model configuration to match. Requests for models outside the allowlist are rejected before reaching OpenCode.
 
-**Allowlist fiyat kontrol sistemi değildir. Ücretsiz dönem bitebilir, model erişimi kaldırılabilir. Bir modele izin vermeden önce güncel fiyatı kontrol et; OpenCode hesabında harcama sınırı ve otomatik bakiye yükleme ayarlarını gözden geçir.** Bazı ücretsiz modellerde veri saklama/eğitim koşulları farklıdır; hassas veri gönderme.
+### Pricing and privacy risks
 
-Upstream adresi `OPENCODE_BASE_URL` ile değiştirilebilir; `/chat/completions` sonuna eklenir. Anahtarların/promptların başka sunucuya gitmemesi için bu ayarı yalnızca güvendiğin endpoint'e yönelt. Redirect takip edilmez. Uzak upstream için HTTPS zorunludur.
+An allowlist is **not a live pricing check**. Free promotions can end, and access can be removed. Check current pricing before enabling models. If you supply a personal OpenCode key, review workspace spending limits and automatic balance reload settings.
 
-## Test
+Some free models have different data-retention or training terms. Do not submit confidential or personal data without reviewing the provider's current privacy terms.
+
+## Tests
 
 ```bash
 npm run check
@@ -130,14 +216,13 @@ npm test
 npm run build
 ```
 
-Testler yerel sahte upstream kullanır; dış servise istek veya ücret oluşturmaz. Auth, allowlist, JSON doğrulama, istek boyutu, canonical oturumlar, uyumluluk araçları, parçalı UTF-8/CRLF SSE, reasoning/usage birleştirme, tool-call güvenliği, eksik akışlar, bağlantı iptali, timeout ve upstream hata aktarımı doğrulanır.
+The 21 automated tests use a local mock upstream; they do not contact external services or incur inference charges. Coverage includes authentication, model restrictions, request validation and size limits, canonical session IDs, compatibility declarations, fragmented UTF-8/CRLF SSE, reasoning/usage/logprobs aggregation, tool-call safety, incomplete streams, cancellation, timeouts, and upstream error forwarding.
 
-## Kaynaklar
+## References
 
-- [OpenCode modeller / endpoint / fiyat / gizlilik](https://opencode.ai/docs/zen/)
-- [Canlı model listesi](https://opencode.ai/inference/v1/models)
-- [CLIProxyAPI resmi örnek config](https://github.com/router-for-me/CLIProxyAPI/blob/main/config.example.yaml)
-- [OpenCode oturum ID üretimi](https://github.com/anomalyco/opencode/blob/dev/packages/schema/src/identifier.ts)
-- [FreeTierError / header, oturum, araç ve streaming bulguları](https://github.com/decolua/9router/issues/4101)
-- [Resmî istemcide aynı hata ve araç izinleri](https://github.com/anomalyco/opencode/issues/49680)
-# opencode-free-proxy
+- [OpenCode models, endpoints, pricing, and privacy](https://opencode.ai/docs/zen/)
+- [Live OpenCode model catalog](https://opencode.ai/inference/v1/models)
+- [Official CLIProxyAPI configuration example](https://github.com/router-for-me/CLIProxyAPI/blob/main/config.example.yaml)
+- [OpenCode session ID generation](https://github.com/anomalyco/opencode/blob/dev/packages/schema/src/identifier.ts)
+- [Community findings on headers, sessions, tools, and streaming](https://github.com/decolua/9router/issues/4101)
+- [Official-client FreeTierError reports and tool permissions](https://github.com/anomalyco/opencode/issues/49680)
